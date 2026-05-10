@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>$app_name</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 720px;
+      margin: 4rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+
+    .button {
+      display: inline-block;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      background: #111827;
+      color: white;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .meta {
+      margin-top: 2rem;
+      color: #4b5563;
+      font-size: 0.95rem;
+    }
+
+    code {
+      background: #f3f4f6;
+      padding: 0.1rem 0.3rem;
+      border-radius: 0.25rem;
+    }
+  </style>
+</head>
+<body>
+    <img src="./sagemotion_logo.png" style="width:200px" alt="SageMotion logo">
+  <h1>$app_name</h1>
+
+  <p>
+    Download the application package below.
+  </p>
+
+  <p>
+    <a class="button" href="./downloads/$zip_filename" download>
+      Download app zip
+    </a>
+  </p>
+
+  <div class="meta">
+    <p><strong>App ID:</strong> <code>$app_id</code></p>
+    <p><strong>App version:</strong> <code>$app_version</code></p>
+    <p><strong>Last commit:</strong> <code title="$commit_hash_full">$commit_hash</code></p>
+    <p><strong>Commit message:</strong> $commit_message</p>
+    <p><strong>Commit date:</strong> $commit_date</p>
+    <p><strong>Published:</strong> $publish_date</p>
+  </div>
+</body>
+</html>
