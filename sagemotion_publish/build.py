@@ -300,7 +300,7 @@ def zip_requires_external_storage(zip_path):
 
 def configure_download(context, zip_path):
     if not zip_requires_external_storage(zip_path):
-        return
+        return False
 
     account_id = env_or_error("SAGEMOTION_R2_ACCOUNT_ID")
     api_token = env_or_error("SAGEMOTION_R2_API_TOKEN")
@@ -331,6 +331,7 @@ def configure_download(context, zip_path):
     context["download_note_block"] = (
         "<p>Your download is ready.</p>"
     )
+    return True
 
 
 def main():
@@ -340,15 +341,18 @@ def main():
 
     clean_build_dir()
     zip_path = create_zip(context["zip_filename_raw"])
-    configure_download(context, zip_path)
+    zip_size_bytes = zip_path.stat().st_size
+    using_external_storage = configure_download(context, zip_path)
+    if using_external_storage:
+        zip_path.unlink()
 
     render_template(context)
     copy_publish_assets()
 
     print(f"Built site for {context['app_name']}")
     print(f"Zip: {context['zip_filename_raw']}")
-    print(f"Zip size: {zip_path.stat().st_size} bytes")
-    if zip_requires_external_storage(zip_path):
+    print(f"Zip size: {zip_size_bytes} bytes")
+    if using_external_storage:
         print("Download storage: external")
     else:
         print("Download storage: local dist/downloads")
