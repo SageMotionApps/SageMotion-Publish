@@ -181,17 +181,6 @@ def iter_repo_files():
         yield path, relative
 
 
-def find_large_files():
-    oversized = []
-
-    for path, relative in iter_repo_files():
-        size = path.stat().st_size
-        if size > LARGE_FILE_THRESHOLD_BYTES:
-            oversized.append((relative, size))
-
-    return sorted(oversized, key=lambda item: str(item[0]))
-
-
 def create_zip(zip_filename):
     zip_path = DOWNLOAD_DIR / zip_filename
 
@@ -305,8 +294,12 @@ def upload_file_to_r2(bucket_name, object_key, file_path):
         ) from exc
 
 
-def configure_download(context, zip_path, oversized_files):
-    if not oversized_files:
+def zip_requires_external_storage(zip_path):
+    return zip_path.stat().st_size > LARGE_FILE_THRESHOLD_BYTES
+
+
+def configure_download(context, zip_path):
+    if not zip_requires_external_storage(zip_path):
         return
 
     account_id = env_or_error("SAGEMOTION_R2_ACCOUNT_ID")
@@ -346,20 +339,17 @@ def main():
     context = build_context(info)
 
     clean_build_dir()
-    oversized_files = find_large_files()
     zip_path = create_zip(context["zip_filename_raw"])
-    configure_download(context, zip_path, oversized_files)
+    configure_download(context, zip_path)
 
     render_template(context)
     copy_publish_assets()
 
     print(f"Built site for {context['app_name']}")
     print(f"Zip: {context['zip_filename_raw']}")
-    if oversized_files:
-        print("Oversized files detected:")
-        for relative, size in oversized_files:
-            print(f"  - {relative} ({size} bytes)")
-        print("Download storage: R2")
+    print(f"Zip size: {zip_path.stat().st_size} bytes")
+    if zip_requires_external_storage(zip_path):
+        print("Download storage: external")
     else:
         print("Download storage: local dist/downloads")
 

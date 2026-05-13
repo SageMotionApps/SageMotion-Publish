@@ -16,12 +16,11 @@ python -m sagemotion_publish
 the package:
 
 - reads app metadata from `info.json` in the current working directory
-- scans the repo for any included file larger than 25 MiB
 - builds `dist/index.html`
 - copies bundled shared assets into `dist/`
 - creates a downloadable app zip in `dist/downloads/`
-- uploads the zip to Cloudflare R2 instead of serving it locally when a file
-  larger than 25 MiB is present
+- uploads the zip to external object storage instead of serving it locally when
+  the generated zip is larger than 25 MiB
 
 ## Expected app repo layout
 
@@ -39,7 +38,7 @@ build script.
 
 ## Large file fallback
 
-If any included repo file is larger than `25 MiB`, the build switches the app
+If the generated app zip is larger than `25 MiB`, the build switches the app
 download to external object storage. In that mode, the generated page still
 shows a normal download link and does not expose the storage provider in the
 UI.
