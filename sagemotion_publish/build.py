@@ -2,17 +2,24 @@ from pathlib import Path
 from string import Template
 from datetime import datetime, timezone
 from importlib.resources import as_file, files
-import subprocess
-import zipfile
+import boto3
 import json
 import html
 import os
 import shutil
+import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import zipfile
 
 APP_DIR = Path.cwd().resolve()
 
 BUILD_DIR = APP_DIR / "dist"
 DOWNLOAD_DIR = BUILD_DIR / "downloads"
+
+LARGE_FILE_THRESHOLD_BYTES = 25 * 1024 * 1024
 
 INFO_FILE = APP_DIR / "info.json"
 TEMPLATE_FILE = files("sagemotion_publish.templates").joinpath("index.html")
@@ -32,6 +39,33 @@ EXCLUDE_DIRS = {
 EXCLUDE_FILES = {
     ".gitignore",
 }
+
+
+def env_or_error(name):
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+
+    raise RuntimeError(
+        f"Missing required environment variable: {name}"
+    )
+
+
+def normalize_bucket_prefix(value):
+    cleaned = []
+
+    for char in value.lower():
+        if char.isalnum():
+            cleaned.append(char)
+        else:
+            cleaned.append("-")
+
+    normalized = "".join(cleaned).strip("-")
+
+    if not normalized:
+        normalized = "sagemotion-app"
+
+    return normalized[:26].strip("-") or "sagemotion-app"
 
 
 def git_output(args, fallback="unknown"):
@@ -64,6 +98,7 @@ def build_context(info):
         "app_id": html.escape(app_id),
         "app_version": html.escape(app_version),
         "zip_filename": html.escape(zip_filename),
+        "zip_filename_raw": zip_filename,
         "commit_hash": html.escape(
             git_output(["git", "rev-parse", "--short", "HEAD"])
         ),
@@ -83,6 +118,9 @@ def build_context(info):
                 "%Y-%m-%dT%H:%M:%SZ"
             )
         ),
+        "download_href": html.escape(f"./downloads/{zip_filename}"),
+        "download_attr": " download",
+        "download_note_block": "",
     }
 
 
@@ -130,6 +168,30 @@ def should_exclude(path: Path):
     return False
 
 
+def iter_repo_files():
+    for path in APP_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+
+        relative = path.relative_to(APP_DIR)
+
+        if should_exclude(relative):
+            continue
+
+        yield path, relative
+
+
+def find_large_files():
+    oversized = []
+
+    for path, relative in iter_repo_files():
+        size = path.stat().st_size
+        if size > LARGE_FILE_THRESHOLD_BYTES:
+            oversized.append((relative, size))
+
+    return sorted(oversized, key=lambda item: str(item[0]))
+
+
 def create_zip(zip_filename):
     zip_path = DOWNLOAD_DIR / zip_filename
 
@@ -138,16 +200,144 @@ def create_zip(zip_filename):
         "w",
         zipfile.ZIP_DEFLATED,
     ) as zf:
-        for path in APP_DIR.rglob("*"):
-            if not path.is_file():
-                continue
-
-            relative = path.relative_to(APP_DIR)
-
-            if should_exclude(relative):
-                continue
-
+        for path, relative in iter_repo_files():
             zf.write(path, relative)
+
+    return zip_path
+
+
+def cf_api_request(method, path, token, payload=None):
+    url = f"https://api.cloudflare.com/client/v4{path}"
+    body = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+    }
+
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method=method,
+        headers=headers,
+    )
+
+    try:
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Cloudflare API request failed ({method} {path}): "
+            f"{exc.code} {error_body}"
+        ) from exc
+
+
+def create_r2_bucket(account_id, api_token):
+    prefix = normalize_bucket_prefix(
+        os.getenv("SAGEMOTION_R2_BUCKET_PREFIX", "sagemotion-app")
+    )
+    suffix = str(uuid.uuid4())
+    bucket_name = f"{prefix}-{suffix}".lower()
+
+    payload = {"name": bucket_name}
+
+    location_hint = os.getenv("SAGEMOTION_R2_LOCATION_HINT", "").strip()
+    if location_hint:
+        payload["locationHint"] = location_hint
+
+    storage_class = os.getenv("SAGEMOTION_R2_STORAGE_CLASS", "").strip()
+    if storage_class:
+        payload["storageClass"] = storage_class
+
+    cf_api_request(
+        "POST",
+        f"/accounts/{account_id}/r2/buckets",
+        api_token,
+        payload,
+    )
+
+    return bucket_name
+
+
+def get_public_bucket_url(account_id, api_token, bucket_name):
+    response = cf_api_request(
+        "PUT",
+        (
+            f"/accounts/{account_id}/r2/buckets/"
+            f"{bucket_name}/domains/managed"
+        ),
+        api_token,
+        {"enabled": True},
+    )
+
+    result = response.get("result") or {}
+    domain = result.get("domain", "").strip()
+
+    if not domain:
+        raise RuntimeError(
+            f"Cloudflare did not return an r2.dev domain for {bucket_name}"
+        )
+
+    return f"https://{domain}"
+
+
+def upload_file_to_r2(bucket_name, object_key, file_path):
+    account_id = env_or_error("SAGEMOTION_R2_ACCOUNT_ID")
+    access_key_id = env_or_error("SAGEMOTION_R2_ACCESS_KEY_ID")
+    secret_access_key = env_or_error("SAGEMOTION_R2_SECRET_ACCESS_KEY")
+
+    client = boto3.client(
+        service_name="s3",
+        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key=secret_access_key,
+        region_name="auto",
+    )
+
+    try:
+        client.upload_file(str(file_path), bucket_name, object_key)
+    except Exception as exc:
+        raise RuntimeError(
+            f"R2 object upload failed for {object_key}: {exc}"
+        ) from exc
+
+
+def configure_download(context, zip_path, oversized_files):
+    if not oversized_files:
+        return
+
+    account_id = env_or_error("SAGEMOTION_R2_ACCOUNT_ID")
+    api_token = env_or_error("SAGEMOTION_R2_API_TOKEN")
+
+    bucket_name = create_r2_bucket(account_id, api_token)
+    public_bucket_url = get_public_bucket_url(
+        account_id,
+        api_token,
+        bucket_name,
+    )
+
+    object_prefix = os.getenv(
+        "SAGEMOTION_R2_OBJECT_PREFIX",
+        "downloads",
+    ).strip().strip("/")
+    object_key = (
+        f"{object_prefix}/{zip_path.name}"
+        if object_prefix
+        else zip_path.name
+    )
+
+    upload_file_to_r2(bucket_name, object_key, zip_path)
+
+    context["download_href"] = html.escape(
+        f"{public_bucket_url}/{urllib.parse.quote(object_key, safe='/-_.~')}"
+    )
+    context["download_attr"] = ""
+    context["download_note_block"] = (
+        "<p>Your download is ready.</p>"
+    )
 
 
 def main():
@@ -156,14 +346,22 @@ def main():
     context = build_context(info)
 
     clean_build_dir()
+    oversized_files = find_large_files()
+    zip_path = create_zip(context["zip_filename_raw"])
+    configure_download(context, zip_path, oversized_files)
 
     render_template(context)
     copy_publish_assets()
 
-    create_zip(context["zip_filename"])
-
     print(f"Built site for {context['app_name']}")
-    print(f"Zip: {context['zip_filename']}")
+    print(f"Zip: {context['zip_filename_raw']}")
+    if oversized_files:
+        print("Oversized files detected:")
+        for relative, size in oversized_files:
+            print(f"  - {relative} ({size} bytes)")
+        print("Download storage: R2")
+    else:
+        print("Download storage: local dist/downloads")
 
 
 if __name__ == "__main__":
